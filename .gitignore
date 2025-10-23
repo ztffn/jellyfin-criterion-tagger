@@ -1,0 +1,10 @@
+# Local secrets
+.mdblist_token
+.env
+*.env
+*.key
+*.secret
+
+# MDblist debug artifacts
+_mdblist_*.bin
+_mdblist_docs.html
