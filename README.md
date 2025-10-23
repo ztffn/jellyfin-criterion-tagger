@@ -9,7 +9,19 @@ Scans your Jellyfin library and tags movies that are part of the Criterion Colle
 ## Usage
 
 ```bash
+# From bundled JSON (default)
 python3 tag-criterion.py
+
+# Or fetch from a remote URL (must return JSON)
+python3 tag-criterion.py --url https://example.com/criterion.json
+
+# Common options
+python3 tag-criterion.py \
+  --db-path /srv/media-server/jellyfin/config/data/library.db \
+  --json criterion-collection.json \
+  --min-similarity 0.92 \
+  --tag-name criterion \
+  --yes            # auto-confirm
 ```
 
 The script will:
@@ -24,14 +36,17 @@ The script will:
 
 ## Configuration
 
-Edit `DB_PATH` at the top of `tag-criterion.py` if your Jellyfin database is in a different location.
+You can supply the database path via `--db-path` or env var `JELLYFIN_DB_PATH`.
+Default: `/srv/media-server/jellyfin/config/data/library.db`.
 
-Default: `/srv/media-server/jellyfin/config/data/library.db`
+By default the Criterion list is loaded from `criterion-collection.json`. You can:
+- Provide a different file with `--json`
+- Fetch from a URL with `--url` (expects an array of objects with `title` and `year`, or a wrapper like `{ "titles": [...] }`)
 
 ## How It Works
 
 - Compares your movies against the complete Criterion Collection list
-- Uses fuzzy title matching (90% similarity threshold)
+- Uses fuzzy title matching (default 0.90 similarity, configurable via `--min-similarity`)
 - Matches on both title and year
 - Safe to run multiple times (won't re-tag)
 - Tags are stored directly in Jellyfin's database
@@ -45,7 +60,7 @@ Use Jellyfin's built-in filters or create a SmartPlaylist:
 ## Files
 
 - `tag-criterion.py` - Main script
-- `criterion-collection.json` - Complete list of 1,669 Criterion titles
+- `criterion-collection.json` - Complete list of 1,669 Criterion titles (fallback if not using `--url`)
 
 ## License
 

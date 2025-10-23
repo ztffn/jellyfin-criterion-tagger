@@ -3,16 +3,35 @@
 Jellyfin Criterion Collection Tagger
 
 Tags Criterion Collection movies in your Jellyfin library.
-Requires: criterion-collection.json (1,669 titles)
 
-Usage: python3 tag-criterion.py
+Now supports loading the Criterion list from either:
+- A local JSON file (default: criterion-collection.json)
+- A remote URL returning JSON via --url
 
-Adjust DB_PATH below if your Jellyfin database is in a different location.
+Basic usage:
+  python3 tag-criterion.py
+
+With URL source:
+  python3 tag-criterion.py --url https://example.com/criterion.json
+
+Other options:
+  --db-path PATH         Path to Jellyfin SQLite database
+  --json PATH            Local JSON file with titles (default)
+  --url URL              Remote URL returning JSON list of titles
+  --min-similarity NUM   Similarity threshold 0.0-1.0 (default 0.90)
+  --tag-name NAME        Tag to apply (default "criterion")
+  --yes                  Auto-confirm tagging (non-interactive)
+  --dry-run              Show what would be tagged but do not write
 """
 
-import sqlite3
+import argparse
 import json
+import os
 import re
+import sqlite3
+import sys
+import urllib.error
+import urllib.request
 from difflib import SequenceMatcher
 
 DB_PATH = "/srv/media-server/jellyfin/config/data/library.db"
@@ -25,51 +44,237 @@ def normalize(title):
 def similarity(s1, s2):
     return SequenceMatcher(None, s1, s2).ratio()
 
-# Load criterion list
-with open(CRITERION_JSON) as f:
-    criterion = json.load(f)
 
-# Connect to Jellyfin
-conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Tag Criterion Collection movies in a Jellyfin library",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
-# Get all movies
-cursor.execute("""
-    SELECT guid, Name, ProductionYear, Tags
-    FROM TypedBaseItems
-    WHERE type = 'MediaBrowser.Controller.Entities.Movies.Movie'
-""")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument(
+        "--json",
+        dest="json_path",
+        default=CRITERION_JSON,
+        help="Local JSON file containing Criterion titles",
+    )
+    source.add_argument(
+        "--url",
+        dest="url",
+        help="Remote URL returning JSON list of Criterion titles",
+    )
 
-matches = []
-for guid, name, year, tags in cursor.fetchall():
-    if tags and 'criterion' in tags.lower():
-        continue  # Already tagged
+    parser.add_argument(
+        "--db-path",
+        default=os.environ.get("JELLYFIN_DB_PATH", DB_PATH),
+        help="Path to Jellyfin SQLite database file",
+    )
+    parser.add_argument(
+        "--min-similarity",
+        type=float,
+        default=0.90,
+        help="Similarity threshold between 0.0 and 1.0",
+    )
+    parser.add_argument(
+        "--tag-name",
+        default=os.environ.get("CRITERION_TAG_NAME", "criterion"),
+        help="Name of the tag to apply",
+    )
+    parser.add_argument(
+        "--yes",
+        "-y",
+        dest="yes",
+        action="store_true",
+        help="Auto-confirm tagging without interactive prompt",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show matches but do not write any changes",
+    )
 
-    norm = normalize(name)
+    return parser.parse_args()
 
-    # Match against criterion list
-    for c in criterion:
-        if c['year'] == year and similarity(norm, normalize(c['title'])) >= 0.90:
-            matches.append((guid, name, year, tags or ''))
-            break
 
-if not matches:
-    print("No new Criterion movies found")
-    exit()
+def _coerce_year(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
-# Show matches
-print(f"Found {len(matches)} Criterion movies:\n")
-for _, name, year, _ in matches:
-    print(f"  • {name} ({year})")
 
-# Confirm and tag
-if input(f"\nTag these {len(matches)} movies? (yes/no): ").lower() == 'yes':
-    for guid, name, year, tags in matches:
-        new_tags = (tags + '|criterion') if tags else 'criterion'
-        cursor.execute("UPDATE TypedBaseItems SET Tags = ? WHERE guid = ?", (new_tags, guid))
-        print(f"  ✓ {name}")
+def _extract_title_year(item):
+    # Try multiple possible key names for robustness
+    title = (
+        item.get("title")
+        or item.get("name")
+        or item.get("Title")
+        or item.get("Name")
+    )
+    year = (
+        item.get("year")
+        or item.get("release_year")
+        or item.get("releaseYear")
+        or item.get("Year")
+    )
+    return title, _coerce_year(year)
 
-    conn.commit()
-    print(f"\n✓ Tagged {len(matches)} movies with 'criterion'")
 
-conn.close()
+def load_criterion_list(json_path=None, url=None):
+    # If URL provided, fetch from network
+    if url:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Jellyfin-Criterion-Tagger/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+        except urllib.error.URLError as e:
+            print(f"Error fetching URL: {e}", file=sys.stderr)
+            sys.exit(2)
+
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            print(f"Invalid JSON from URL: {e}", file=sys.stderr)
+            sys.exit(2)
+
+    else:
+        path = json_path or CRITERION_JSON
+        if not os.path.exists(path):
+            print(f"JSON file not found: {path}", file=sys.stderr)
+            sys.exit(2)
+        with open(path, "r", encoding="utf-8") as f:
+            try:
+                payload = json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"Invalid JSON file: {e}", file=sys.stderr)
+                sys.exit(2)
+
+    # Normalize to a list of {title, year}
+    if isinstance(payload, dict):
+        # Try common wrappers
+        candidates = None
+        for key in ("titles", "items", "data", "results"):
+            if key in payload and isinstance(payload[key], list):
+                candidates = payload[key]
+                break
+        if candidates is None:
+            print("Unsupported JSON structure: missing list of titles", file=sys.stderr)
+            sys.exit(2)
+        items = candidates
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        print("Unsupported JSON structure: expected list or object", file=sys.stderr)
+        sys.exit(2)
+
+    result = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title, year = _extract_title_year(item)
+        if not title:
+            continue
+        result.append({"title": str(title), "year": _coerce_year(year)})
+    return result
+
+def get_jellyfin_movies(conn):
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT guid, Name, ProductionYear, Tags
+        FROM TypedBaseItems
+        WHERE type = 'MediaBrowser.Controller.Entities.Movies.Movie'
+        """
+    )
+    return cursor.fetchall()
+
+def main():
+    args = parse_args()
+
+    # Load criterion list from chosen source
+    criterion = load_criterion_list(json_path=args.json_path, url=args.url)
+
+    # Build simple index by year to reduce comparisons
+    by_year = {}
+    for item in criterion:
+        y = _coerce_year(item.get("year"))
+        if y is None:
+            # Titles without a year are grouped under None
+            by_year.setdefault(None, []).append(item)
+        else:
+            by_year.setdefault(y, []).append(item)
+
+    # Connect to Jellyfin
+    conn = sqlite3.connect(args.db_path)
+    try:
+        rows = get_jellyfin_movies(conn)
+        matches = []
+        for guid, name, year, tags in rows:
+            existing_tags = (tags or "")
+            if args.tag_name.lower() in existing_tags.lower():
+                continue
+
+            norm = normalize(name)
+
+            candidates = []
+            if year in by_year:
+                candidates.extend(by_year[year])
+            # Also consider yearless entries
+            if None in by_year:
+                candidates.extend(by_year[None])
+
+            found = False
+            for c in candidates:
+                if similarity(norm, normalize(c["title"])) >= args.min_similarity:
+                    matches.append((guid, name, year, existing_tags))
+                    found = True
+                    break
+            if found:
+                continue
+
+        if not matches:
+            print("No new Criterion movies found")
+            return
+
+        # Show matches
+        print(f"Found {len(matches)} Criterion movies:\n")
+        for _, m_name, m_year, _ in matches:
+            if m_year is None:
+                print(f"  • {m_name}")
+            else:
+                print(f"  • {m_name} ({m_year})")
+
+        if args.dry_run:
+            print("\nDry run: no changes written")
+            return
+
+        if not args.yes:
+            if input(f"\nTag these {len(matches)} movies? (yes/no): ").strip().lower() != "yes":
+                print("Aborted")
+                return
+
+        cursor = conn.cursor()
+        updated = 0
+        safe_tag = args.tag_name.strip()
+        for guid, m_name, _m_year, existing_tags in matches:
+            new_tags = (existing_tags + f"|{safe_tag}") if existing_tags else safe_tag
+            cursor.execute(
+                "UPDATE TypedBaseItems SET Tags = ? WHERE guid = ?",
+                (new_tags, guid),
+            )
+            updated += 1
+            print(f"  ✓ {m_name}")
+
+        conn.commit()
+        print(f"\n✓ Tagged {updated} movies with '{safe_tag}'")
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    main()
