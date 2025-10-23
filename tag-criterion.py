@@ -1,30 +1,33 @@
 #!/usr/bin/env python3
 """
-Jellyfin Criterion Collection Tagger
+Jellyfin List Tagger
 
-Tags Criterion Collection movies in your Jellyfin library.
+Tags Jellyfin movies whose titles match a provided list source.
 
-Now supports loading the Criterion list from either:
-- A local JSON file (default: criterion-collection.json)
-- A remote URL returning JSON via --url
+Sources supported:
+- Local JSON file (default)
+- Remote URL returning JSON via --url (e.g., MDblist)
 
 Basic usage:
   python3 tag-criterion.py
 
-With URL source:
-  python3 tag-criterion.py --url https://example.com/criterion.json
+With URL source (e.g., MDblist):
+  python3 tag-criterion.py --url https://example.com/list.json
 
 Other options:
   --db-path PATH         Path to Jellyfin SQLite database
   --json PATH            Local JSON file with titles (default)
   --url URL              Remote URL returning JSON list of titles
   --min-similarity NUM   Similarity threshold 0.0-1.0 (default 0.90)
-  --tag-name NAME        Tag to apply (repeatable; default "criterion")
+  --tag-name NAME        Tag to apply (repeatable; default "list")
   --yes                  Auto-confirm tagging (non-interactive)
   --dry-run              Show what would be tagged but do not write
   --api-key KEY          Append apikey query param and header for URL requests
   --bearer TOKEN         Authorization: Bearer TOKEN header for URL requests
   --http-header H:V      Additional HTTP header (repeatable)
+  --items-field PATH     Dotted path to array within payload (optional)
+  --title-field PATH     Dotted path to title within each item (optional)
+  --year-field PATH      Dotted path to year/date within each item (optional)
 """
 
 import argparse
@@ -39,7 +42,7 @@ import urllib.parse
 from difflib import SequenceMatcher
 
 DB_PATH = "/srv/media-server/jellyfin/config/data/library.db"
-CRITERION_JSON = "criterion-collection.json"
+SOURCE_JSON = "criterion-collection.json"
 
 def normalize(title):
     title = re.sub(r'^(The|A|An)\s+', '', title, flags=re.IGNORECASE)
@@ -59,13 +62,13 @@ def parse_args():
     source.add_argument(
         "--json",
         dest="json_path",
-        default=CRITERION_JSON,
-        help="Local JSON file containing Criterion titles",
+        default=SOURCE_JSON,
+        help="Local JSON file containing titles",
     )
     source.add_argument(
         "--url",
         dest="url",
-        help="Remote URL returning JSON list of Criterion titles",
+        help="Remote URL returning JSON list of titles",
     )
 
     parser.add_argument(
@@ -119,6 +122,23 @@ def parse_args():
         help="Extra HTTP header 'Key: Value' (repeatable)",
     )
 
+    # Optional JSON mapping for arbitrary APIs (e.g., MDblist)
+    parser.add_argument(
+        "--items-field",
+        dest="items_field",
+        help="Dotted path to list of items within payload",
+    )
+    parser.add_argument(
+        "--title-field",
+        dest="title_field",
+        help="Dotted path to title within each item",
+    )
+    parser.add_argument(
+        "--year-field",
+        dest="year_field",
+        help="Dotted path to year/date within each item",
+    )
+
     return parser.parse_args()
 
 
@@ -131,21 +151,66 @@ def _coerce_year(value):
         return None
 
 
-def _extract_title_year(item):
-    # Try multiple possible key names for robustness
-    title = (
-        item.get("title")
-        or item.get("name")
-        or item.get("Title")
-        or item.get("Name")
-    )
-    year = (
-        item.get("year")
-        or item.get("release_year")
-        or item.get("releaseYear")
-        or item.get("Year")
-    )
-    return title, _coerce_year(year)
+def _get_by_dotted(obj, path):
+    if not path:
+        return None
+    cur = obj
+    for part in path.split('.'):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def _parse_year_like(value):
+    # Accept int, string year, or date-like strings (YYYY-MM-DD)
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        # Extract leading 4-digit year
+        m = re.match(r"^(\d{4})", s)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                return None
+        try:
+            return int(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_title_year(item, title_field=None, year_field=None):
+    # If explicit fields provided, use them (support dotted paths)
+    if title_field:
+        t = _get_by_dotted(item, title_field)
+    else:
+        t = (
+            item.get("title")
+            or item.get("name")
+            or item.get("Title")
+            or item.get("Name")
+        )
+
+    if year_field:
+        y_raw = _get_by_dotted(item, year_field)
+    else:
+        y_raw = (
+            item.get("year")
+            or item.get("release_year")
+            or item.get("releaseYear")
+            or item.get("Year")
+            or item.get("released")
+            or item.get("release_date")
+            or item.get("date")
+        )
+
+    return t, _parse_year_like(y_raw)
 
 
 def _parse_headers(header_list):
@@ -183,7 +248,7 @@ def _append_query_param(url, key, value):
         return url
 
 
-def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=None, extra_headers=None):
+def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=None, extra_headers=None, items_field=None, title_field=None, year_field=None):
     # If URL provided, fetch from network
     if url:
         request_url = url
@@ -216,7 +281,7 @@ def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=Non
             sys.exit(2)
 
     else:
-        path = json_path or CRITERION_JSON
+        path = json_path or SOURCE_JSON
         if not os.path.exists(path):
             print(f"JSON file not found: {path}", file=sys.stderr)
             sys.exit(2)
@@ -229,12 +294,14 @@ def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=Non
 
     # Normalize to a list of {title, year}
     if isinstance(payload, dict):
-        # Try common wrappers
-        candidates = None
-        for key in ("titles", "items", "data", "results"):
-            if key in payload and isinstance(payload[key], list):
-                candidates = payload[key]
-                break
+        # Use explicit items_field if provided
+        candidates = _get_by_dotted(payload, items_field) if items_field else None
+        if candidates is None:
+            # Try common wrappers
+            for key in ("titles", "items", "data", "results"):
+                if key in payload and isinstance(payload[key], list):
+                    candidates = payload[key]
+                    break
         if candidates is None:
             print("Unsupported JSON structure: missing list of titles", file=sys.stderr)
             sys.exit(2)
@@ -249,7 +316,7 @@ def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=Non
     for item in items:
         if not isinstance(item, dict):
             continue
-        title, year = _extract_title_year(item)
+        title, year = _extract_title_year(item, title_field=title_field, year_field=year_field)
         if not title:
             continue
         result.append({"title": str(title), "year": _coerce_year(year)})
@@ -276,6 +343,9 @@ def main():
         api_key=args.api_key,
         bearer_token=args.bearer_token,
         extra_headers=args.http_headers,
+        items_field=args.items_field,
+        title_field=args.title_field,
+        year_field=args.year_field,
     )
 
     # Build simple index by year to reduce comparisons
@@ -296,7 +366,11 @@ def main():
         for guid, name, year, tags in rows:
             existing_tags = (tags or "")
             # Prepare tags to apply
-            configured_tags = args.tag_names or [os.environ.get("CRITERION_TAG_NAME", "criterion")]
+            configured_tags = args.tag_names or [
+                os.environ.get("DEFAULT_TAG_NAME")
+                or os.environ.get("CRITERION_TAG_NAME")
+                or "list"
+            ]
 
             # Skip if all configured tags already present
             existing_lower = {t.strip().lower() for t in existing_tags.split("|") if t}
@@ -344,7 +418,11 @@ def main():
 
         cursor = conn.cursor()
         updated = 0
-        configured_tags = args.tag_names or [os.environ.get("CRITERION_TAG_NAME", "criterion")]
+        configured_tags = args.tag_names or [
+            os.environ.get("DEFAULT_TAG_NAME")
+            or os.environ.get("CRITERION_TAG_NAME")
+            or "list"
+        ]
         configured_tags = [t.strip() for t in configured_tags if t and t.strip()]
         for guid, m_name, _m_year, existing_tags in matches:
             # Merge tags without duplicates (case-insensitive)

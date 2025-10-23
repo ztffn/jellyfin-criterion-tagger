@@ -1,10 +1,10 @@
-# Jellyfin Criterion Collection Tagger
+# Jellyfin List Tagger
 
-Automatically tag Criterion Collection movies in your Jellyfin library.
+Automatically tag Jellyfin movies that appear in a provided list (local JSON or remote API like MDblist).
 
 ## What It Does
 
-Scans your Jellyfin library and tags movies that are part of the Criterion Collection (1,669 titles). Uses fuzzy matching to handle title variations.
+Scans your Jellyfin library and tags any movies that match your source list. Uses fuzzy matching to handle title variations.
 
 ## Usage
 
@@ -13,7 +13,7 @@ Scans your Jellyfin library and tags movies that are part of the Criterion Colle
 python3 tag-criterion.py
 
 # Or fetch from a remote URL (must return JSON)
-python3 tag-criterion.py --url https://example.com/criterion.json
+python3 tag-criterion.py --url https://example.com/list.json
 
 # Example: MDblist (requires API key)
 # Docs: https://docs.mdblist.com/docs/api
@@ -27,12 +27,16 @@ python3 tag-criterion.py --url "https://mdblist.com/l/your_list_id" \
 python3 tag-criterion.py --url "https://mdblist.com/l/your_list_id" \
   --bearer "$MDBLIST_API_TOKEN" --dry-run
 
+# If the API returns a wrapped structure, map fields explicitly:
+python3 tag-criterion.py --url "https://api.example.com/list" \
+  --items-field data.items --title-field title --year-field year --dry-run
+
 # Common options
 python3 tag-criterion.py \
   --db-path /srv/media-server/jellyfin/config/data/library.db \
   --json criterion-collection.json \
   --min-similarity 0.92 \
-  --tag-name criterion --tag-name mdblist \
+  --tag-name list --tag-name mdblist \
   --yes            # auto-confirm
 ```
 
@@ -51,13 +55,14 @@ The script will:
 You can supply the database path via `--db-path` or env var `JELLYFIN_DB_PATH`.
 Default: `/srv/media-server/jellyfin/config/data/library.db`.
 
-By default the Criterion list is loaded from `criterion-collection.json`. You can:
+By default a local JSON file is used (`criterion-collection.json`). You can:
 - Provide a different file with `--json`
-- Fetch from a URL with `--url` (expects an array of objects with `title` and `year`, or a wrapper like `{ "titles": [...] }`)
+- Fetch from a URL with `--url`
+- Map fields with `--items-field`, `--title-field`, `--year-field` when the JSON shape differs
 
 ## How It Works
 
-- Compares your movies against the complete Criterion Collection list
+- Compares your movies against the provided source list
 - Uses fuzzy title matching (default 0.90 similarity, configurable via `--min-similarity`)
 - Matches on both title and year
 - Safe to run multiple times (won't re-tag)
@@ -66,13 +71,13 @@ By default the Criterion list is loaded from `criterion-collection.json`. You ca
 ## After Tagging
 
 Use Jellyfin's built-in filters or create a SmartPlaylist:
-- Filter by tag: "criterion"
+- Filter by your chosen tag(s)
 - Or use SmartPlaylist plugin with rule: `Tags contains "criterion"`
 
 ## Files
 
 - `tag-criterion.py` - Main script
-- `criterion-collection.json` - Complete list of 1,669 Criterion titles (fallback if not using `--url`)
+- `criterion-collection.json` - Example list file (fallback if not using `--url`)
 
 ## License
 
