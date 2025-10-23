@@ -15,12 +15,24 @@ python3 tag-criterion.py
 # Or fetch from a remote URL (must return JSON)
 python3 tag-criterion.py --url https://example.com/criterion.json
 
+# Example: MDblist (requires API key)
+# Docs: https://docs.mdblist.com/docs/api
+# You can request a list endpoint and pass auth via headers or query params.
+# Common patterns:
+#  - As apikey query and header
+python3 tag-criterion.py --url "https://mdblist.com/l/your_list_id" \
+  --api-key "$MDBLIST_API_KEY" --dry-run
+
+#  - As bearer token
+python3 tag-criterion.py --url "https://mdblist.com/l/your_list_id" \
+  --bearer "$MDBLIST_API_TOKEN" --dry-run
+
 # Common options
 python3 tag-criterion.py \
   --db-path /srv/media-server/jellyfin/config/data/library.db \
   --json criterion-collection.json \
   --min-similarity 0.92 \
-  --tag-name criterion \
+  --tag-name criterion --tag-name mdblist \
   --yes            # auto-confirm
 ```
 

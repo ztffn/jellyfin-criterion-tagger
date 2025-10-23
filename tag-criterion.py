@@ -19,9 +19,12 @@ Other options:
   --json PATH            Local JSON file with titles (default)
   --url URL              Remote URL returning JSON list of titles
   --min-similarity NUM   Similarity threshold 0.0-1.0 (default 0.90)
-  --tag-name NAME        Tag to apply (default "criterion")
+  --tag-name NAME        Tag to apply (repeatable; default "criterion")
   --yes                  Auto-confirm tagging (non-interactive)
   --dry-run              Show what would be tagged but do not write
+  --api-key KEY          Append apikey query param and header for URL requests
+  --bearer TOKEN         Authorization: Bearer TOKEN header for URL requests
+  --http-header H:V      Additional HTTP header (repeatable)
 """
 
 import argparse
@@ -32,6 +35,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
+import urllib.parse
 from difflib import SequenceMatcher
 
 DB_PATH = "/srv/media-server/jellyfin/config/data/library.db"
@@ -77,8 +81,9 @@ def parse_args():
     )
     parser.add_argument(
         "--tag-name",
-        default=os.environ.get("CRITERION_TAG_NAME", "criterion"),
-        help="Name of the tag to apply",
+        dest="tag_names",
+        action="append",
+        help="Tag to apply (repeat this flag to add multiple tags)",
     )
     parser.add_argument(
         "--yes",
@@ -91,6 +96,27 @@ def parse_args():
         "--dry-run",
         action="store_true",
         help="Show matches but do not write any changes",
+    )
+
+    # URL auth and headers (useful for MDblist and similar APIs)
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=os.environ.get("API_KEY"),
+        help="API key for URL requests (adds apikey query param and header)",
+    )
+    parser.add_argument(
+        "--bearer",
+        dest="bearer_token",
+        default=os.environ.get("BEARER_TOKEN"),
+        help="Bearer token for URL requests (Authorization header)",
+    )
+    parser.add_argument(
+        "--http-header",
+        dest="http_headers",
+        action="append",
+        default=[],
+        help="Extra HTTP header 'Key: Value' (repeatable)",
     )
 
     return parser.parse_args()
@@ -122,13 +148,60 @@ def _extract_title_year(item):
     return title, _coerce_year(year)
 
 
-def load_criterion_list(json_path=None, url=None):
+def _parse_headers(header_list):
+    headers = {}
+    for entry in header_list or []:
+        if not entry:
+            continue
+        if ":" not in entry:
+            # skip invalid header format
+            continue
+        key, value = entry.split(":", 1)
+        headers[key.strip()] = value.strip()
+    return headers
+
+
+def _append_query_param(url, key, value):
+    try:
+        parsed = urllib.parse.urlparse(url)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        if key not in query:
+            query[key] = [value]
+        new_query = urllib.parse.urlencode(query, doseq=True)
+        new_url = urllib.parse.urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                new_query,
+                parsed.fragment,
+            )
+        )
+        return new_url
+    except Exception:
+        return url
+
+
+def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=None, extra_headers=None):
     # If URL provided, fetch from network
     if url:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Jellyfin-Criterion-Tagger/1.0"},
-        )
+        request_url = url
+        headers = {"User-Agent": "Jellyfin-Criterion-Tagger/1.1", "Accept": "application/json"}
+
+        # Apply API key as query param if provided
+        if api_key:
+            request_url = _append_query_param(request_url, "apikey", api_key)
+            headers.setdefault("apikey", api_key)
+
+        # Apply bearer token header if provided
+        if bearer_token:
+            headers["Authorization"] = f"Bearer {bearer_token}"
+
+        # Merge extra headers
+        headers.update(_parse_headers(extra_headers))
+
+        req = urllib.request.Request(request_url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = resp.read()
@@ -197,7 +270,13 @@ def main():
     args = parse_args()
 
     # Load criterion list from chosen source
-    criterion = load_criterion_list(json_path=args.json_path, url=args.url)
+    criterion = load_criterion_list(
+        json_path=args.json_path,
+        url=args.url,
+        api_key=args.api_key,
+        bearer_token=args.bearer_token,
+        extra_headers=args.http_headers,
+    )
 
     # Build simple index by year to reduce comparisons
     by_year = {}
@@ -216,7 +295,12 @@ def main():
         matches = []
         for guid, name, year, tags in rows:
             existing_tags = (tags or "")
-            if args.tag_name.lower() in existing_tags.lower():
+            # Prepare tags to apply
+            configured_tags = args.tag_names or [os.environ.get("CRITERION_TAG_NAME", "criterion")]
+
+            # Skip if all configured tags already present
+            existing_lower = {t.strip().lower() for t in existing_tags.split("|") if t}
+            if all(t.strip().lower() in existing_lower for t in configured_tags):
                 continue
 
             norm = normalize(name)
@@ -260,9 +344,17 @@ def main():
 
         cursor = conn.cursor()
         updated = 0
-        safe_tag = args.tag_name.strip()
+        configured_tags = args.tag_names or [os.environ.get("CRITERION_TAG_NAME", "criterion")]
+        configured_tags = [t.strip() for t in configured_tags if t and t.strip()]
         for guid, m_name, _m_year, existing_tags in matches:
-            new_tags = (existing_tags + f"|{safe_tag}") if existing_tags else safe_tag
+            # Merge tags without duplicates (case-insensitive)
+            existing_list = [t for t in existing_tags.split("|") if t]
+            existing_lower = {t.lower() for t in existing_list}
+            to_add = [t for t in configured_tags if t.lower() not in existing_lower]
+            if to_add:
+                new_tags = (existing_tags + ("|" if existing_tags else "") + "|".join(to_add)) if existing_tags else "|".join(to_add)
+            else:
+                new_tags = existing_tags
             cursor.execute(
                 "UPDATE TypedBaseItems SET Tags = ? WHERE guid = ?",
                 (new_tags, guid),
@@ -271,7 +363,7 @@ def main():
             print(f"  ✓ {m_name}")
 
         conn.commit()
-        print(f"\n✓ Tagged {updated} movies with '{safe_tag}'")
+        print(f"\n✓ Tagged {updated} movies")
     finally:
         conn.close()
 
