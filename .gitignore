@@ -1,0 +1,6 @@
+# Local secrets
+.mdblist_token
+.env
+*.env
+*.key
+*.secret
