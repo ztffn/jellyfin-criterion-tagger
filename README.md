@@ -41,7 +41,7 @@ python3 mdblist-tagger.py \
 ```
 
 The script will:
-1. Find Criterion Collection movies in your library
+1. Find movies in your library that match your list
 2. Show you what it found
 3. Ask for confirmation before tagging
 
