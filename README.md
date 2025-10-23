@@ -1,4 +1,4 @@
-# Jellyfin List Tagger
+# Jellyfin MDblist Tagger
 
 Automatically tag Jellyfin movies that appear in a provided list (local JSON or remote API like MDblist).
 
@@ -10,31 +10,31 @@ Scans your Jellyfin library and tags any movies that match your source list. Use
 
 ```bash
 # From bundled JSON (default)
-python3 tag-criterion.py
+python3 mdblist-tagger.py
 
 # Or fetch from a remote URL (must return JSON)
-python3 tag-criterion.py --url https://example.com/list.json
+python3 mdblist-tagger.py --url https://example.com/list.json
 
 # Example: MDblist (requires API key)
-# Docs: https://docs.mdblist.com/docs/api
+# Docs: https://mdblist.docs.apiary.io/
 # You can request a list endpoint and pass auth via headers or query params.
 # Common patterns:
 #  - As apikey query and header
-python3 tag-criterion.py --url "https://mdblist.com/l/your_list_id" \
+python3 mdblist-tagger.py --url "https://api.mdblist.com/lists/<user>/<slug>/items" \
   --api-key "$MDBLIST_API_KEY" --dry-run
 
 #  - As bearer token
-python3 tag-criterion.py --url "https://mdblist.com/l/your_list_id" \
+python3 mdblist-tagger.py --url "https://api.mdblist.com/lists/<user>/<slug>/items" \
   --bearer "$MDBLIST_API_TOKEN" --dry-run
 
 # If the API returns a wrapped structure, map fields explicitly:
-python3 tag-criterion.py --url "https://api.example.com/list" \
+python3 mdblist-tagger.py --url "https://api.example.com/list" \
   --items-field data.items --title-field title --year-field year --dry-run
 
 # Common options
-python3 tag-criterion.py \
+python3 mdblist-tagger.py \
   --db-path /srv/media-server/jellyfin/config/data/library.db \
-  --json criterion-collection.json \
+  --json example-list.json \
   --min-similarity 0.92 \
   --tag-name list --tag-name mdblist \
   --yes            # auto-confirm
@@ -55,7 +55,7 @@ The script will:
 You can supply the database path via `--db-path` or env var `JELLYFIN_DB_PATH`.
 Default: `/srv/media-server/jellyfin/config/data/library.db`.
 
-By default a local JSON file is used (`criterion-collection.json`). You can:
+By default a local JSON file is used (`example-list.json`). You can:
 - Provide a different file with `--json`
 - Fetch from a URL with `--url`
 - Map fields with `--items-field`, `--title-field`, `--year-field` when the JSON shape differs
@@ -76,8 +76,8 @@ Use Jellyfin's built-in filters or create a SmartPlaylist:
 
 ## Files
 
-- `tag-criterion.py` - Main script
-- `criterion-collection.json` - Example list file (fallback if not using `--url`)
+- `mdblist-tagger.py` - Main script
+- `example-list.json` - Example list file (fallback if not using `--url`)
 
 ## License
 

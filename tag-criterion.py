@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Jellyfin List Tagger
+Jellyfin MDblist Tagger
 
 Tags Jellyfin movies whose titles match a provided list source.
 
@@ -9,10 +9,10 @@ Sources supported:
 - Remote URL returning JSON via --url (e.g., MDblist)
 
 Basic usage:
-  python3 tag-criterion.py
+  python3 mdblist-tagger.py
 
 With URL source (e.g., MDblist):
-  python3 tag-criterion.py --url https://example.com/list.json
+  python3 mdblist-tagger.py --url https://example.com/list.json
 
 Other options:
   --db-path PATH         Path to Jellyfin SQLite database
@@ -42,7 +42,7 @@ import urllib.parse
 from difflib import SequenceMatcher
 
 DB_PATH = "/srv/media-server/jellyfin/config/data/library.db"
-SOURCE_JSON = "criterion-collection.json"
+SOURCE_JSON = "example-list.json"
 
 def normalize(title):
     title = re.sub(r'^(The|A|An)\s+', '', title, flags=re.IGNORECASE)
@@ -54,7 +54,7 @@ def similarity(s1, s2):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Tag Criterion Collection movies in a Jellyfin library",
+        description="Tag Jellyfin movies whose titles match a provided list",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -248,11 +248,11 @@ def _append_query_param(url, key, value):
         return url
 
 
-def load_criterion_list(json_path=None, url=None, api_key=None, bearer_token=None, extra_headers=None, items_field=None, title_field=None, year_field=None):
+def load_list(json_path=None, url=None, api_key=None, bearer_token=None, extra_headers=None, items_field=None, title_field=None, year_field=None):
     # If URL provided, fetch from network
     if url:
         request_url = url
-        headers = {"User-Agent": "Jellyfin-Criterion-Tagger/1.1", "Accept": "application/json"}
+        headers = {"User-Agent": "Jellyfin-List-Tagger/1.1", "Accept": "application/json"}
 
         # Apply API key as query param if provided
         if api_key:
@@ -336,8 +336,8 @@ def get_jellyfin_movies(conn):
 def main():
     args = parse_args()
 
-    # Load criterion list from chosen source
-    criterion = load_criterion_list(
+    # Load list from chosen source
+    source_list = load_list(
         json_path=args.json_path,
         url=args.url,
         api_key=args.api_key,
@@ -350,7 +350,7 @@ def main():
 
     # Build simple index by year to reduce comparisons
     by_year = {}
-    for item in criterion:
+    for item in source_list:
         y = _coerce_year(item.get("year"))
         if y is None:
             # Titles without a year are grouped under None
@@ -396,11 +396,11 @@ def main():
                 continue
 
         if not matches:
-            print("No new Criterion movies found")
+            print("No new matches found")
             return
 
         # Show matches
-        print(f"Found {len(matches)} Criterion movies:\n")
+        print(f"Found {len(matches)} movies:\n")
         for _, m_name, m_year, _ in matches:
             if m_year is None:
                 print(f"  • {m_name}")
